@@ -14,7 +14,13 @@ function string.starts(String, Start)
 	return string.sub(String, 1, string.len(Start)) == Start
 end
 
-local function execute_command(command, result_callback)
+local function node()
+	return "node"
+end
+
+local function execute_command(command, result_callback, ...)
+	local callback_args = ...
+
 	Job:new({
 		command = "cmd",
 		args = { "/C", command },
@@ -25,23 +31,18 @@ local function execute_command(command, result_callback)
 			local result = j:result()
 
 			vim.schedule(function()
-				result_callback(result)
+				result_callback(result, callback_args)
 			end)
 		end,
 	}):sync()
 end
 
-local function ignore_response(response)
-	return
-end
+local function ignore_response(response) end
 
 local function display_response(response)
 	if response == nil or #response == 0 then
 		return
 	end
-
-	print(#response)
-	print(response)
 
 	Win_id = Popup.create(response, {})
 	local bufnr = vim.api.nvim_win_get_buf(Win_id)
@@ -67,15 +68,179 @@ local function deploy(relative_path)
 end
 
 local function gulp(type, file_path)
-	local cmd = "node node_modules/gulp/bin/gulp.js " .. type .. " --file=" .. file_path
+	local cmd = node() .. " node_modules/gulp/bin/gulp.js ' .. type .. " --file=" .. file_path
 
-	execute_command(cmd, display_response)
+	execute_command(cmd, ignore_response)
+end
+
+local function is_ts_app(file)
+	return file.folder == "src/pages"
+end
+
+local function include_as_dep(name, key)
+	if string.starts(name, "./node_modules") then
+		return false
+	end
+	if not string.starts(name, "./") then
+		return false
+	end
+
+	if string.find(name, ".vue?vue", 1, true) then
+		return false
+	end
+
+	if name == "./" .. key then
+		return false
+	end
+
+	return true
+end
+
+local function update_deps(file, data)
+	local deps = {}
+	local key = file.relative_path
+
+	for i, module in pairs(data["modules"]) do
+		if module["modules"] then
+			for j, inner_module in pairs(module["modules"]) do
+				local name = inner_module["name"]
+				if include_as_dep(name, key) then
+					deps[#deps + 1] = string.sub(name, 3)
+				end
+			end
+		else
+			if include_as_dep(module["name"], key) then
+				deps[#deps + 1] = string.sub(module["name"], 3)
+			end
+		end
+	end
+
+	local f = io.open("ts-deps.json", "r")
+	local ts_deps = vim.json.decode(f:read("*a"))
+	f:close()
+
+	ts_deps[key] = deps
+
+	local updated_deps = vim.json.encode(ts_deps)
+
+	local wf = io.open("ts-deps.json", "w")
+	wf:write(updated_deps)
+	wf:close()
+end
+
+local function display_webpack_results(data)
+	if #data["errors"] > 0 then
+		local errors = {}
+
+		local function log(str)
+			errors[#errors + 1] = str
+		end
+
+		for k, err in pairs(#data["errors"]) do
+			log("---------------")
+			if err["file"] then
+				log("-- File: " .. err["file"])
+			end
+			if err["message"] then
+				log("-- Message --")
+				log(err["message"])
+			end
+			if err["loc"] then
+				log("-- Loc " .. error["loc"])
+			end
+			if err["stack"] then
+				log("-- Stack --")
+				log(err["stack"])
+			end
+			if err["details"] then
+				log("-- Details --")
+				log(err["details"])
+			end
+		end
+
+		display_response(errors)
+	end
+
+	if #data["warnings"] > 0 then
+		display_response(data["warnings"])
+	end
+end
+
+local function handle_webpack_response(response, file)
+	local json_string = table.concat(response, " ")
+
+	local data = vim.json.decode(json_string)
+	display_webpack_results(data)
+
+	if is_ts_app(file) then
+		update_deps(file, data)
+	end
+
+	local js_file = vim.fs.joinpath("dist", file.basefilename .. ".js")
+	gulp("tsjs", js_file)
+	deploy(js_file)
+end
+
+local function webpack(file)
+	local src = vim.fs.joinpath(file.folder, file.basefilename)
+	local dst = file.basefilename .. ".js"
+
+	local cmd = node()
+		.. " node_modules/webpack/bin/webpack.js --json --entry ./"
+		.. src
+		.. " --output-path .\\dist --output-filename "
+		.. dst
+
+	execute_command(cmd, handle_webpack_response, file)
+end
+
+local function get_ts_roots(file)
+	local f = io.open("ts-deps.json", "r")
+	local ts_deps = vim.json.decode(f:read("*a"))
+	f:close()
+
+	roots = {}
+	for root, deps in pairs(ts_deps) do
+		for _, v in pairs(deps) do
+			if v == file.relative_path then
+				roots[#roots + 1] = root
+				break
+			end
+		end
+	end
+
+	return roots
+end
+
+local function file_from_path(path)
+	local relative_file_folder = vim.fs.dirname(path)
+	local file_name = string.sub(path, #relative_file_folder + 2)
+	local file_name_without_extension = vim.fs.basename(file_name)
+	local file_extension = string.sub(file_name, #file_name_without_extension + 1)
+
+	local folder, base, ext = string.match(path, "(.-)([^/]-([^%.]+))$")
+
+	local file = {
+		folder = folder,
+		basefilename = base,
+		extension = ext,
+		relative_path = path,
+	}
+
+	return file
 end
 
 local function handle_ts(file)
-	print("Handle TS")
-
-	-- Todo.. This is a bit of a pain, and more or less deprecated anyway..
+	if is_ts_app(file) then
+		webpack(file)
+	else
+		local roots = get_ts_roots(file)
+		for k, root in pairs(roots) do
+			local root_file = file_from_path(root)
+			print("Processing root: " .. root_file.relative_path)
+			webpack(file_from_path(root))
+		end
+	end
 end
 
 local function handle_js(file)
@@ -102,13 +267,16 @@ local function handle_default(file)
 end
 
 function fumbbl.build()
+	local start_time = os.clock()
+
 	local project_path = vim.fs.normalize(vim.fn.getcwd())
 	local relative_file_path = vim.fs.normalize(vim.fn.expand("%"))
 	local relative_file_folder = vim.fs.dirname(relative_file_path)
 	local absolute_file_path = vim.fs.normalize(vim.fs.abspath(relative_file_path))
 	local file_name_without_extension = vim.fs.basename(vim.fn.expand("%:r"))
-	local file_extension = vim.bo.filetype
+	local file_extension = vim.fn.expand("%:e")
 
+	print(relative_file_path)
 	-- Ignore files outside of project path
 	if not string.starts(absolute_file_path, project_path) then
 		print("File is not part of project")
@@ -136,13 +304,14 @@ function fumbbl.build()
 		handle_default(file)
 	end
 
+	local elapsed_time = os.clock() - start_time
+	print("Build complete in " .. string.format("%.2f", elapsed_time) .. " seconds.")
 	--vim.api.nvim_command('write')
 	--execute_command("dir", display_response)
 end
 
 function fumbbl.deployDev()
-	local cmd = vim.fn.exepath("node") .. "\\node node_modules\\vite\\bin\\vite build --outDir ../dist --mode dev"
-	print("Executing command: " .. cmd)
+	local cmd = node() .. "\\node node_modules\\vite\\bin\\vite build --outDir ../dist --mode dev"
 	execute_command(cmd, display_response)
 end
 
