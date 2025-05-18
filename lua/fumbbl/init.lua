@@ -6,6 +6,8 @@ local fumbbl = {}
 
 local dev_root = "S:"
 
+local start_time
+
 local function close_menu()
 	vim.api.nvim_win_close(Win_id, true)
 end
@@ -18,10 +20,15 @@ local function node()
 	return "node"
 end
 
+local function display_time(prefix)
+	local elapsed_time = os.clock() - start_time
+	print(prefix .. ". Elapsed: " .. string.format("%.2f", elapsed_time) .. " seconds.")
+end
+
 local function execute_command(command, result_callback, ...)
 	local callback_args = ...
 
-	Job:new({
+	local job = Job:new({
 		command = "cmd",
 		args = { "/C", command },
 		cwd = vim.fn.getcwd(),
@@ -34,7 +41,9 @@ local function execute_command(command, result_callback, ...)
 				result_callback(result, callback_args)
 			end)
 		end,
-	}):sync()
+	})
+
+	return job:sync()
 end
 
 local function ignore_response(response) end
@@ -64,13 +73,20 @@ local function deploy(relative_path)
 	local project_path = vim.fn.getcwd()
 	local deploy_path = dev_root
 
+	print("Deploying: " .. relative_path)
 	copyfile(vim.fs.joinpath(project_path, relative_path), vim.fs.joinpath(deploy_path, relative_path))
 end
 
-local function gulp(type, file_path)
-	local cmd = node() .. " node_modules/gulp/bin/gulp.js ' .. type .. " --file=" .. file_path
+local function sync_manifest(response)
+	deploy("rev-manifest.json")
+	display_time("Manifest updated")
+end
 
-	execute_command(cmd, ignore_response)
+local function gulp(type, file_path)
+	local cmd = node() .. " node_modules/gulp/bin/gulp.js " .. type .. " --file=" .. file_path
+
+	print("Gulp command: " .. cmd)
+	execute_command(cmd, sync_manifest)
 end
 
 local function is_ts_app(file)
@@ -179,6 +195,8 @@ local function handle_webpack_response(response, file)
 	local js_file = vim.fs.joinpath("dist", file.basefilename .. ".js")
 	gulp("tsjs", js_file)
 	deploy(js_file)
+
+	display_time("Webpack complete")
 end
 
 local function webpack(file)
@@ -190,6 +208,7 @@ local function webpack(file)
 		.. src
 		.. " --output-path .\\dist --output-filename "
 		.. dst
+	print("Webpack command: " .. cmd)
 
 	execute_command(cmd, handle_webpack_response, file)
 end
@@ -218,7 +237,7 @@ local function file_from_path(path)
 	local file_name_without_extension = vim.fs.basename(file_name)
 	local file_extension = string.sub(file_name, #file_name_without_extension + 1)
 
-	local folder, base, ext = string.match(path, "(.-)([^/]-([^%.]+))$")
+	local folder, base, ext = string.match(path, "(.*)/([^/]+)[.]([^.]*)$")
 
 	local file = {
 		folder = folder,
@@ -248,7 +267,6 @@ local function handle_js(file)
 
 	deploy(file.relative_path)
 	deploy(vim.fs.joinpath(file.folder, "min", file.basefilename .. "-min.js"))
-	deploy("rev-manifest.json")
 end
 
 local function handle_less(file)
@@ -259,7 +277,6 @@ local function handle_less(file)
 	local relative_css_path = vim.fs.normalize(vim.fs.joinpath(css_folder, css_file_name))
 
 	deploy(relative_css_path)
-	deploy("rev-manifest.json")
 end
 
 local function handle_default(file)
@@ -267,7 +284,7 @@ local function handle_default(file)
 end
 
 function fumbbl.build()
-	local start_time = os.clock()
+	start_time = os.clock()
 
 	local project_path = vim.fs.normalize(vim.fn.getcwd())
 	local relative_file_path = vim.fs.normalize(vim.fn.expand("%"))
@@ -304,10 +321,7 @@ function fumbbl.build()
 		handle_default(file)
 	end
 
-	local elapsed_time = os.clock() - start_time
-	print("Build complete in " .. string.format("%.2f", elapsed_time) .. " seconds.")
-	--vim.api.nvim_command('write')
-	--execute_command("dir", display_response)
+	display_time("Build complete")
 end
 
 function fumbbl.deployDev()
