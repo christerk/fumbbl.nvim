@@ -2,7 +2,10 @@ local Job = require("plenary.job")
 local Popup = require("plenary.popup")
 
 local Win_id
-local fumbbl = {}
+local fumbbl = {
+	enable_build = false,
+	enable_deploy = false,
+}
 
 local dev_root = "S:"
 
@@ -27,6 +30,8 @@ end
 
 local function execute_command(command, result_callback, ...)
 	local callback_args = ...
+
+	print("Executing command: " .. command)
 
 	local job = Job:new({
 		command = "cmd",
@@ -283,7 +288,13 @@ local function handle_default(file)
 	deploy(file.relative_path)
 end
 
+-- Build command for Site project
 function fumbbl.build()
+	if not fumbbl.enable_build then
+		print("Build is disabled")
+		return
+	end
+
 	start_time = os.clock()
 
 	local project_path = vim.fs.normalize(vim.fn.getcwd())
@@ -309,27 +320,36 @@ function fumbbl.build()
 		relative_path = relative_file_path,
 	}
 
-	if file_extension == "ts" then
-		handle_ts(file)
-	elseif file_extension == "js" then
-		handle_js(file)
-	elseif file_extension == "less" then
-		handle_less(file)
-	elseif file_extension == "vue" then
-		handle_ts(file)
-	else
-		handle_default(file)
-	end
+	local handlers = {
+		ts = handle_ts,
+		js = handle_js,
+		less = handle_less,
+		vue = handle_ts,
+	}
+
+	local handler = handlers[file_extension] or handle_default
+	handler(file)
 
 	display_time("Build complete")
 end
 
+-- Deploy commands for UI project
 function fumbbl.deployDev()
+	if not fumbbl.enable_deploy then
+		print("Deploy is disabled")
+		return
+	end
+
 	local cmd = node() .. "\\node node_modules\\vite\\bin\\vite build --outDir ../dist --mode dev"
 	execute_command(cmd, display_response)
 end
 
 function fumbbl.deployLive()
+	if not fumbbl.enable_deploy then
+		print("Deploy is disabled")
+		return
+	end
+
 	local cmd = vim.fn.exepath("node") .. "\\node node_modules\\vite\\bin\\vite build --outDir ../distlive --mode live"
 	execute_command(cmd, display_response)
 end
